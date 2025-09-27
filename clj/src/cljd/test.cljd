@@ -193,6 +193,146 @@
             [cljd.string :as str]
             ["package:test/test.dart" :as dt]))
 
+;;; GLOBALS USED BY THE REPORTING FUNCTIONS
+
+(def ^:dynamic *report-counters* nil)	  ; bound to a ref of a map in test-ns
+
+(def ^:dynamic *testing-vars* (list))  ; bound to hierarchy of vars being tested
+
+(def ^:dynamic *testing-contexts* (list)) ; bound to hierarchy of "testing" strings
+
+(def ^:dynamic *test-out* *out*)         ; PrintWriter for test reporting output
+
+(defmacro with-test-out
+  "Runs body with *out* bound to the value of *test-out*."
+  {:added "1.1"}
+  [& body]
+  `(binding [*out* *test-out*]
+     ~@body))
+
+(defmulti
+  ^{:doc "Generic reporting function, may be overridden to plug in
+   different report formats (e.g., TAP, JUnit).  Assertions such as
+   'is' call 'report' to indicate results.  The argument given to
+   'report' will be a map with a :type key.  See the documentation at
+   the top of test_is.clj for more information on the types of
+   arguments for 'report'."
+     :dynamic true
+     :added "1.1"}
+  report :type)
+
+;;; UTILITIES FOR REPORTING FUNCTIONS
+
+(defn testing-vars-str
+  "Returns a string representation of the current test.  Renders names
+  in *testing-vars* as a list, then the source file and line of
+  current assertion."
+  {:added "1.1"}
+  [{:keys [file line]}]
+  (str
+    (reverse (map #(:name (meta %)) *testing-vars*))
+    " (" file ":" line ")"))
+
+(defn testing-contexts-str
+  "Returns a string representation of the current test context. Joins
+  strings in *testing-contexts* with spaces."
+  {:added "1.1"}
+  []
+  (apply str (interpose " " (reverse *testing-contexts*))))
+
+(defn inc-report-counter
+  "Increments the named counter in *report-counters*, a ref to a map.
+  Does nothing if *report-counters* is nil."
+  {:added "1.1"}
+  [name]
+  (when *report-counters*
+    (set! *report-counters* (update *report-counters* name (fnil inc 0)))
+    ;; (dosync (commute *report-counters* update-in [name] (fnil inc 0)))
+    ))
+
+;;; TEST RESULT REPORTING
+
+(defn- part-stacktrace-element [element]
+  (when-let [source-parts (seq (butlast (rest (re-find #"\([^)]+\)$" element))))]
+    (let [source             (apply str source-parts)
+          re-line-and-column #":\d+:\d+$"
+          line-and-column    (re-find re-line-and-column source)]
+        {:file      (str/replace line-and-column re-line-and-column "")
+         :line      (re-find #"\d+" line-and-column)
+         :classname (str/replace source re-line-and-column "")})))
+
+(defn- part-stacktrace [stacktrace]
+  (->> stacktrace
+       str
+       str/split-lines
+       (keep part-stacktrace-element)))
+
+(defn- clojure-classname? [m]
+  (when-let [cl-name (:classname m)]
+    ;; TODO: These should be dart/cljd
+    (or (str/starts-with? cl-name "java.lang.") ; dart:
+        (str/starts-with? cl-name "clojure.test$") ; cljd.test
+        (str/starts-with? cl-name "clojure.core$ex_info") ; cljd.core/ex-info
+        )))
+
+(defn- first-stacktrace-info [stacktrace]
+  (->> stacktrace
+       part-stacktrace
+       (drop-while clojure-classname?)
+       first))
+
+(defn do-report
+  "Add file and line information to a test result and call report.
+   If you are writing a custom assert-expr method, call this function
+   to pass test results to report."
+  {:added "1.2"}
+  [m]
+  (report
+    (case (:type m)
+      :fail (merge (first-stacktrace-info (.-current dart:core/StackTrace)) m)
+      :error (merge (-> m :stacktrace first-stacktrace-info) m)
+      m)))
+
+(defmethod report :default [m]
+  (with-test-out (prn m)))
+
+(defmethod report :pass [m]
+  (with-test-out
+    (inc-report-counter :pass)))
+
+(defmethod report :fail [m]
+  (with-test-out
+    (inc-report-counter :fail)
+    (println "\nFAIL in" (testing-vars-str m))
+    (when (seq *testing-contexts*) (println (testing-contexts-str)))
+    (some-> (:message m) println)
+    (println "expected:" (pr-str (:expected m)))
+    (println "  actual:" (pr-str (:actual m)))))
+
+(defmethod report :error [m]
+  (with-test-out
+    (inc-report-counter :error)
+    (println "\nERROR in" (testing-vars-str m))
+    (when (seq *testing-contexts*) (println (testing-contexts-str)))
+    (some-> (:message m) println)
+    (println "expected:" (pr-str (:expected m)))
+    (println "  actual:" (pr-str (:actual m)))))
+
+(defmethod report :summary [m]
+  (with-test-out
+    (println "\nRan" (:test m) "tests containing"
+             (+ (:pass m) (:fail m) (:error m)) "assertions.")
+    (println (:fail m) "failures," (:error m) "errors.")))
+
+(defmethod report :begin-test-ns [m]
+  (with-test-out
+    (println "\nTesting" (name (:ns m)))))
+
+;; Ignore these message types:
+(defmethod report :end-test-ns [m])
+(defmethod report :begin-test-var [m])
+(defmethod report :end-test-var [m])
+
 ;;; UTILITIES FOR ASSERTIONS
 
 (defn ^:macro-support assert-predicate
