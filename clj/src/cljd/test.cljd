@@ -383,49 +383,56 @@
 (defn- ^:macro-support function? [env sym]
   (and (symbol? sym) (when-some [v (resolve-symbol env sym)] (not (:macro (:meta v))))))
 
-(defn ^:macro-support assert-expr [env msg form]
-  (case (cond
-          (nil? form) :always-fail
-          (seq? form) (first form)
-          :else :default)
-    :always-fail
-    ;; nil test: always fail
-    `{:type :fail, :message ~msg}
-    thrown?
-    ;; (is (thrown? c expr))
-    ;; Asserts that evaluating expr throws an exception of class c.
-    ;; Returns the exception thrown.
-    (let [klass (second form)
-          body (nthnext form 2)]
-      `(try
-         {:type :fail, :message ~msg,
-          :actual (do ~@body)}
-         (catch ~klass e# nil)))
-    instance? ; TODO dart/is? or satisfies?
-    ;; Test if x is an instance of y.
-    (let [klass (nth form 1)]
-      `(let [object# ~(nth form 2)]
-         (when-not (dart/is? object# ~klass)
-           {:type :fail, :message ~msg,
-            :expected '~form, :actual (.-runtimeType object#)})))
-    thrown-with-msg?
-    ;; (is (thrown-with-msg? c re expr))
-    ;; Asserts that evaluating expr throws an exception of class c.
-    ;; Also asserts that the message string of the exception matches
-    ;; (with re-find) the regular expression re.
-    (let [klass (nth form 1)
-          re (nth form 2)
-          body (nthnext form 3)]
-      `(try
-         {:type :fail, :message ~msg, :expected '~form,
-          :actual (do ~@body)}
-         (catch ~klass e#
-           (when-not (re-find ~re (ex-message e#))
-             {:type :fail, :message ~msg,
-              :expected '~form, :actual e#}))))
-    (if (and (sequential? form) (function? env (first form)))
-      (assert-predicate msg form)
-      (assert-any msg form))))
+(defmulti ^:macro-support assert-expr
+  (fn [env msg form]
+    (cond
+      (nil? form) :always-fail
+      (seq? form) (first form)
+      :else :default)))
+
+(defmethod ^:macro-support assert-expr :always-fail [env msg form]
+  ;; nil test: always fail
+  `{:type :fail, :message ~msg})
+
+(defmethod ^:macro-support assert-expr 'thrown? [env msg form]
+  ;; (is (thrown? c expr))
+  ;; Asserts that evaluating expr throws an exception of class c.
+  ;; Returns the exception thrown.
+  (let [klass (second form)
+        body (nthnext form 2)]
+    `(try
+        {:type :fail, :message ~msg,
+        :actual (do ~@body)}
+        (catch ~klass e# nil))))
+
+(defmethod ^:macro-support assert-expr 'instance? [env msg form]
+  ;; Test if x is an instance of y.
+  (let [klass (nth form 1)]
+    `(let [object# ~(nth form 2)]
+        (when-not (dart/is? object# ~klass)
+          {:type :fail, :message ~msg,
+          :expected '~form, :actual (.-runtimeType object#)}))))
+
+(defmethod ^:macro-support assert-expr 'thrown-with-msg? [env msg form]
+  ;; (is (thrown-with-msg? c re expr))
+  ;; Asserts that evaluating expr throws an exception of class c.
+  ;; Also asserts that the message string of the exception matches
+  ;; (with re-find) the regular expression re.
+  (let [klass (nth form 1)
+        re (nth form 2)
+        body (nthnext form 3)]
+    `(try
+        {:type :fail, :message ~msg, :expected '~form,
+        :actual (do ~@body)}
+        (catch ~klass e#
+          (when-not (re-find ~re (ex-message e#))
+            {:type :fail, :message ~msg,
+            :expected '~form, :actual e#})))))
+
+(defmethod ^:macro-support assert-expr :default [env msg form]
+  (if (and (sequential? form) (function? env (first form)))
+    (assert-predicate msg form)
+    (assert-any msg form)))
 
 (deftype Result [m s]
   Object
